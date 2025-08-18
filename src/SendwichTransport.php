@@ -3,53 +3,101 @@
 namespace Vblinden\Sendwich;
 
 use Illuminate\Support\Facades\Http;
+use Symfony\Component\Mailer\Envelope;
 use Symfony\Component\Mailer\Exception\TransportException;
 use Symfony\Component\Mailer\SentMessage;
 use Symfony\Component\Mailer\Transport\AbstractTransport;
+use Symfony\Component\Mime\Address;
+use Symfony\Component\Mime\Email;
+use Symfony\Component\Mime\MessageConverter;
 
 class SendwichTransport extends AbstractTransport
 {
     protected function doSend(SentMessage $message): void
     {
-        $apiKey = config('sendwich.api.key');
-        $apiUrl = config('sendwich.api.url');
+        $email = MessageConverter::toEmail($message->getOriginalMessage());
+        $envelope = $message->getEnvelope();
 
-        if (empty($apiKey)) {
-            throw new TransportException('Sendwich API key is not configured. Please set SENDWICH_API_KEY in your environment.');
+        $apiKey = config('sendwich.api.key');
+        $apiUrl = config('sendwich.api.url', 'https://sendwich.dev');
+
+        $headers = [];
+        $headersToSkip = ['from', 'to', 'cc', 'bcc', 'subject', 'content-type', 'sender', 'reply-to'];
+        foreach ($email->getHeaders() as $name => $header) {
+            if (in_array($name, $headersToSkip, true)) {
+                continue;
+            }
+
+            $headers[$header->getName()] = $header->getBodyAsString();
         }
 
-        $raw = $message->getMessage();
+        if (! $apiKey) {
+            throw new TransportException('Sendwich API key is not configured. Please define SENDWICH_API_KEY in your environment.');
+        }
 
         try {
             $response = Http::withHeaders([
                 'Authorization' => 'Bearer '.$apiKey,
             ])->timeout(30)->post(sprintf('%s/api/v1/message', $apiUrl), [
-                'message' => base64_encode($raw->toString()),
+                'bcc' => $this->stringifyAddresses($email->getBcc()),
+                'cc' => $this->stringifyAddresses($email->getCc()),
+                'from' => $envelope->getSender()->toString(),
+                'headers' => $headers,
+                'html' => $email->getHtmlBody(),
+                'reply_to' => $this->stringifyAddresses($email->getReplyTo()),
+                'subject' => $email->getSubject(),
+                'text' => $email->getTextBody(),
+                'to' => $this->stringifyAddresses($this->getRecipients($email, $envelope)),
+                'attachments' => $this->getAttachments($email),
             ]);
 
             if ($response->failed()) {
-                $statusCode = $response->status();
-                $errorBody = $response->body();
-
-                $errorMessage = match ($statusCode) {
-                    401 => 'Authentication failed. Please check your Sendwich API key.',
-                    403 => 'Access denied. Your API key may not have permission to send messages.',
-                    404 => 'Sendwich API endpoint not found. Please verify the API URL configuration.',
-                    422 => sprintf('Invalid message format: %s', $errorBody),
-                    429 => 'Rate limit exceeded. Please try again later.',
-                    500, 502, 503, 504 => 'Sendwich service is temporarily unavailable. Please try again later.',
-                    default => sprintf('Failed to send message via Sendwich API. Status: %d, Response: %s', $statusCode, $errorBody),
-                };
-
-                throw new TransportException($errorMessage, $statusCode);
+                throw new TransportException(sprintf('Request to Sendwich API failed. Reason: %s', $response->body()), $response->status());
             }
-        } catch (\Illuminate\Http\Client\ConnectionException $e) {
-            throw new TransportException(sprintf('Failed to connect to Sendwich API: %s', $e->getMessage()), 0, $e);
-        } catch (\Illuminate\Http\Client\RequestException $e) {
-            throw new TransportException(sprintf('Request to Sendwich API failed: %s', $e->getMessage()), 0, $e);
-        } catch (\Exception $e) {
-            throw new TransportException(sprintf('Unexpected error while sending message via Sendwich: %s', $e->getMessage()), 0, $e);
+        } catch (\Throwable $exception) {
+            throw new TransportException(sprintf('Request to Sendwich API failed. Reason: %s', $exception->getMessage()), is_int($exception->getCode()) ? $exception->getCode() : 0, $exception);
         }
+    }
+
+    protected function getRecipients(Email $email, Envelope $envelope): array
+    {
+        return array_filter($envelope->getRecipients(), function (Address $address) use ($email) {
+            return in_array($address, array_merge($email->getCc(), $email->getBcc()), true) === false;
+        });
+    }
+
+    protected function getAttachments(Email $email): array
+    {
+        $attachments = [];
+        if ($email->getAttachments()) {
+            foreach ($email->getAttachments() as $attachment) {
+                $attachmentHeaders = $attachment->getPreparedHeaders();
+
+                $contentType = $attachmentHeaders->get('Content-Type')->getBody();
+                $disposition = $attachmentHeaders->getHeaderBody('Content-Disposition');
+                $filename = $attachmentHeaders->getHeaderParameter('Content-Disposition', 'filename');
+
+                if ($contentType == 'text/calendar') {
+                    $content = $attachment->getBody();
+                } else {
+                    $content = str_replace("\r\n", '', $attachment->bodyToString());
+                }
+
+                $item = [
+                    'content_type' => $contentType,
+                    'content' => $content,
+                    'filename' => $filename,
+                ];
+
+                if ($disposition === 'inline') {
+                    $item['content_id'] = $attachment->hasContentId() ? $attachment->getContentId() : $filename;
+                }
+
+                $attachments[] = $item;
+            }
+        }
+
+        return $attachments;
     }
 
     public function __toString(): string
