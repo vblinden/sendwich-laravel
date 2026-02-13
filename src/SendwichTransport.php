@@ -38,6 +38,7 @@ class SendwichTransport extends AbstractTransport
         try {
             $response = Http::withHeaders([
                 'Authorization' => 'Bearer '.$apiKey,
+                'Accept' => 'application/json',
             ])->timeout(30)->post(sprintf('%s/api/v1/message', $apiUrl), [
                 'bcc' => $this->stringifyAddresses($email->getBcc()),
                 'cc' => $this->stringifyAddresses($email->getCc()),
