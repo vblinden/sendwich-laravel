@@ -39,18 +39,21 @@ class SendwichTransport extends AbstractTransport
             $response = Http::withHeaders([
                 'Authorization' => 'Bearer '.$apiKey,
                 'Accept' => 'application/json',
-            ])->timeout(30)->post(sprintf('%s/api/v1/message', $apiUrl), [
-                'bcc' => $this->stringifyAddresses($email->getBcc()),
-                'cc' => $this->stringifyAddresses($email->getCc()),
-                'from' => $envelope->getSender()->toString(),
-                'headers' => $headers,
-                'html' => $email->getHtmlBody(),
-                'reply_to' => $this->stringifyAddresses($email->getReplyTo()),
-                'subject' => $email->getSubject(),
-                'text' => $email->getTextBody(),
-                'to' => $this->stringifyAddresses($this->getRecipients($email, $envelope)),
-                'attachments' => $this->getAttachments($email),
-            ]);
+            ])
+                ->withoutRedirecting()
+                ->timeout(30)
+                ->post(sprintf('%s/api/v1/message', $apiUrl), [
+                    'bcc' => $this->stringifyAddresses($email->getBcc()),
+                    'cc' => $this->stringifyAddresses($email->getCc()),
+                    'from' => $envelope->getSender()->toString(),
+                    'headers' => $headers,
+                    'html' => $email->getHtmlBody(),
+                    'reply_to' => $this->stringifyAddresses($email->getReplyTo()),
+                    'subject' => $email->getSubject(),
+                    'text' => $email->getTextBody(),
+                    'to' => $this->stringifyAddresses($this->getRecipients($email, $envelope)),
+                    'attachments' => $this->getAttachments($email),
+                ]);
 
             if ($response->failed()) {
                 throw new TransportException(sprintf('Request to Sendwich API failed. Reason: %s', $response->body()), $response->status());
